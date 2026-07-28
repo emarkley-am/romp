@@ -76,5 +76,23 @@ class PaneIntegration(unittest.TestCase):
         self.assertIn('p.startswith("/plugins/")', self.src)
 
 
+class ShimMessageHook(unittest.TestCase):
+    """The shim must expose window.__rompOnMessage so plain inline-JS pages (no
+    bundle, like the plugins pane) can register a callback for every parsed WS
+    message — not just the federation/postMessage path chat/fleet/feed/timeline
+    ride."""
+    def setUp(self):
+        self.src = open(os.path.join(ROOT, "kernel", "kernel.py")).read()
+
+    def test_shim_exposes_rompOnMessage(self):
+        self.assertIn("__rompOnMessage", self.src)
+
+    def test_shim_dispatches_to_registered_callbacks(self):
+        i = self.src.find("def _shim(")
+        self.assertGreater(i, -1)
+        block = self.src[i:i + 6000]
+        self.assertIn("_msgCbs", block)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13865,6 +13865,10 @@ def _shim(app, v=0):
     # pane sat silent through rebuilds).
     return """
 (function(){var queue=[],ws=null,everConnected=false;var wid=new URLSearchParams(location.search).get("wid")||"";
+// __rompOnMessage: a plain-inline-JS page with no bundle (the plugins pane, following the gear.js
+// precedent) has no federation.ts to dispatch through — register a callback here and it's called with
+// EVERY parsed WS message (alongside, not instead of, the existing __rompFed/dispatchEvent path below).
+var _msgCbs=[];window.__rompOnMessage=function(fn){_msgCbs.push(fn);};
 var APP="%s";var LOADEDV=%d;var lastRecv=0;var STALE_MS=30000;   // watchdog: no frame (incl. keepalive) for this long → the socket is dead → reconnect
 var connT=0;   // when the current socket's connect() attempt started — the progress watchdog's reference point
 // Tell the shell this pane's WS state so it can show ONE "disconnected" banner (the user 2026-06-27): a real
@@ -13904,6 +13908,7 @@ ws=new WebSocket(proto+location.host+"/ws?app=%s"+(wid?"&wid="+encodeURIComponen
 ws.onopen=function(){lastRecv=Date.now();netState("up");var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);queue=[];if(wasReconn)raiseStale();};
 ws.onmessage=function(ev){lastRecv=Date.now();var msg;try{msg=JSON.parse(ev.data);}catch(e){return;}
 if(msg&&msg.type==="ka"){if(LOADEDV&&msg.dv&&msg.dv>LOADEDV)raiseBuild();return;}   // keepalive: stamped lastRecv above; carries the build token (drift → reload banner); nothing for the bundle to render
+_msgCbs.forEach(function(fn){try{fn(msg);}catch(e){}});
 if(window.__rompFed){window.__rompFed.inbound("",msg);}else{window.dispatchEvent(new MessageEvent("message",{data:msg}));}};
 // onclose: flag the shell, RE-SHOW this pane's romp loader (the user 2026-06-29, who wanted the swirling loader on
 // kernel restart), + RETRY (don't blind-reload — on a real outage the reload just fails into a dead page).
