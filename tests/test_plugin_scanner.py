@@ -55,5 +55,26 @@ class PluginRouteShape(unittest.TestCase):
         self.assertIn('"light-led"', block)
 
 
+class PaneIntegration(unittest.TestCase):
+    """The plugins pane must be wired into the landing shell (rail button, pane
+    div, collapse-state machine) and its own static-file route, the same way the
+    other panes (chat/fleet/feed/timeline) are."""
+    def setUp(self):
+        self.src = open(os.path.join(ROOT, "kernel", "kernel.py")).read()
+
+    def test_landing_has_plugins_pane(self):
+        self.assertIn("plugins-pane", self.src)
+        self.assertIn("data-pane=plugins", self.src)
+
+    def test_collapse_js_knows_plugins(self):
+        i = self.src.find("var PK='romp-panes'")
+        self.assertGreater(i, -1)
+        block = self.src[i:i + 500]
+        self.assertIn("plugins", block)
+
+    def test_plugins_static_route(self):
+        self.assertIn('p.startswith("/plugins/")', self.src)
+
+
 if __name__ == "__main__":
     unittest.main()

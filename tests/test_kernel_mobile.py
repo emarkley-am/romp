@@ -30,7 +30,7 @@ class LandingShell(unittest.TestCase):
         # explicitly desktop-only (#fleet-pane display:none!important, no tab, no switcher entry).
         html = km._landing()
         self.assertIn(">Outline</button>", html)                       # the tab exists, labeled Outline
-        self.assertIn("#f-chat.m-on,#f-fleet.m-on,#f-feed.m-on{display:block}", html)   # ...and shows as the active pane
+        self.assertIn("#f-chat.m-on,#f-fleet.m-on,#f-feed.m-on,#f-plugins.m-on{display:block}", html)   # ...and shows as the active pane
         self.assertNotIn("#fleet-pane{display:none!important}", html)  # the desktop-only exclusion is gone
         self.assertIn("fleet:document.getElementById('f-fleet')", km._LANDING_MOBILE_JS)
         # the chat header's Fleet pill / the fleet's back-to-chat (toggleFleet) is a tab switch on mobile

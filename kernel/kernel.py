@@ -13428,6 +13428,7 @@ def _push(targets, connect=False):
     want_fleet = any(c["app"] == "fleet" for c in targets)
     want_feed = any(c["app"] in ("feed", "fleet", "chat") for c in targets)   # fleet rides the feed payload; chat needs feed["working"]
     want_tl = any(c["app"] == "timeline" for c in targets)
+    want_plugins = any(c["app"] == "plugins" for c in targets)
     chat_clients = [c for c in targets if c["app"] == "chat"]
     try:
         chat_list = _chat_tab_sessions(now, tmux)   # living + recently-died-while-shown, minus ×-hidden
@@ -13543,6 +13544,13 @@ def _push(targets, connect=False):
                 #                                                     "no activity"; a later warmed push (tl_warming False) settles it (the user 2026-07-03)
             else:
                 timeline = _cached_timeline(now, tmux, fsig, connect)
+        plugins_msg = None
+        if want_plugins:   # cheap (stat calls only, no subprocess) — safe on every push, no separate cache signature
+            pl = [{"name": p.get("name", ""), "description": p.get("description", ""),
+                   "status": _plugin_status(p), "hasUi": bool(p.get("ui")),
+                   "ui": "/plugins/%s/%s" % (p["name"], p["ui"]) if p.get("ui") else None}
+                  for p in (_plugins_cache[0] or _scan_plugins())]
+            plugins_msg = {"type": "plugins", "plugins": pl}
     except Exception:
         sys.stderr.write("push build: %s\n" % traceback.format_exc())
         return
@@ -13553,6 +13561,8 @@ def _push(targets, connect=False):
             _send_client(c, ("timelinebars",), {"type": "bars", "turns": timeline["turns"],
                          "judging": timeline["judging"], "messages": timeline["messages"],
                          "now": timeline["now"], "warming": tl_warming})
+        elif c["app"] == "plugins" and plugins_msg is not None:
+            _send_client(c, ("plugins",), plugins_msg)
     with _clients_lock:
         _clients[:] = [c for c in _clients if c.get("alive", True)]
 
@@ -14170,10 +14180,143 @@ def _fleet_page():
             % (v, THEME_CSS, fleet_css, _pane_spin("fleet-list"), _shim("fleet", v), v, v))
 
 
+_PLUGINS_CSS = (
+    "body{margin:0;font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+    "color:#cfd6dd;background:var(--vscode-editor-background,#1e1e1e)}"
+    "#plugins-root{padding:12px 16px}"
+    ".pl-head{font-size:15px;font-weight:600;margin-bottom:12px;color:#e8eef5}"
+    ".pl-card{display:flex;align-items:center;gap:10px;padding:10px 12px;"
+    "border:1px solid #333;border-radius:8px;margin-bottom:8px;cursor:pointer;"
+    "transition:border-color .15s}"
+    ".pl-card:hover{border-color:#555}"
+    ".pl-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}"
+    ".pl-dot.running{background:#2ecc71}.pl-dot.stopped{background:#666}"
+    ".pl-dot.not_configured{background:#e0a020}"
+    ".pl-name{font-weight:600;color:#e8eef5}.pl-desc{opacity:.7;font-size:12px}"
+    ".pl-info{flex:1;min-width:0}"
+    ".pl-btn{font:inherit;cursor:pointer;border-radius:6px;padding:5px 11px;"
+    "border:1px solid #444;background:#2a2d31;color:#cfd6dd;white-space:nowrap}"
+    ".pl-btn:hover{border-color:#666;background:#333}"
+    ".pl-btn.accent{background:var(--accent,#9cd2ff);color:var(--accent-fg,#0c1a2e);"
+    "border-color:transparent;font-weight:600}"
+    ".pl-back{cursor:pointer;opacity:.7;margin-bottom:8px;font-size:12px}"
+    ".pl-back:hover{opacity:1}"
+    ".pl-detail{margin-top:8px}"
+    ".pl-detail iframe{width:100%;border:none;border-radius:6px;"
+    "background:var(--vscode-editor-background,#1e1e1e)}"
+    ".pl-status{display:flex;align-items:center;gap:8px;margin-bottom:12px}"
+)
+
+# Plain inline JS, no bundle (follows the gear.js precedent for self-contained pages): a card list of
+# discovered plugins, a detail view (status + start/stop + the plugin's own ui.html in an iframe), fed
+# initially by the server-baked #pl-init JSON and kept live over the shim's WS via window.__rompOnMessage.
+_PLUGINS_JS = """
+(function(){
+  var root = document.getElementById('plugins-root');
+  var plugins = [];
+  var detail = null;   // name of the plugin in detail view, or null for list
+
+  function dot(s) { return '<span class="pl-dot '+s+'"></span>'; }
+  function statusLabel(s) { return s === 'not_configured' ? 'not configured' : s; }
+
+  function renderList() {
+    var h = '<div class=pl-head>Plugins</div>';
+    if (!plugins.length) { h += '<div style="opacity:.5">No plugins found in plugins/</div>'; }
+    plugins.forEach(function(p) {
+      h += '<div class=pl-card data-name="'+p.name+'">'
+         + dot(p.status)
+         + '<div class=pl-info><div class=pl-name>'+p.name+'</div>'
+         + '<div class=pl-desc>'+p.description+'</div></div>'
+         + (p.status==='running'
+            ? '<button class="pl-btn" data-act=stop data-name="'+p.name+'">Stop</button>'
+            : p.status==='stopped'
+            ? '<button class="pl-btn accent" data-act=start data-name="'+p.name+'">Start</button>'
+            : '')
+         + '</div>';
+    });
+    root.innerHTML = h;
+  }
+
+  function renderDetail(name) {
+    var p = plugins.find(function(x){return x.name===name;});
+    if (!p) { detail = null; renderList(); return; }
+    var h = '<div class=pl-back data-back=1>\\u2190 Plugins</div>'
+          + '<div class=pl-status>' + dot(p.status)
+          + '<span class=pl-name>' + p.name + '</span>'
+          + '<span style="opacity:.6"> \\u2014 ' + statusLabel(p.status) + '</span>'
+          + (p.status==='running'
+             ? '<button class="pl-btn" data-act=stop data-name="'+p.name+'">Stop</button>'
+             : '<button class="pl-btn accent" data-act=start data-name="'+p.name+'">Start</button>')
+          + '</div>';
+    if (p.hasUi && p.ui) {
+      h += '<div class=pl-detail><iframe id=plugin-ui src="'+p.ui+'" style="height:calc(100vh - 120px)"></iframe></div>';
+    }
+    root.innerHTML = h;
+  }
+
+  function postAction(name, action, extra) {
+    var body = Object.assign({name: name, action: action}, extra || {});
+    fetch('/plugin', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body)})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if (d.status) {
+          var p = plugins.find(function(x){return x.name===name;});
+          if (p) p.status = d.status;
+          if (detail === name) renderDetail(name); else renderList();
+        }
+      });
+  }
+
+  root.addEventListener('click', function(e) {
+    var t = e.target;
+    if (t.dataset && t.dataset.back) { detail = null; renderList(); return; }
+    if (t.dataset && t.dataset.act) {
+      e.stopPropagation();
+      postAction(t.dataset.name, t.dataset.act);
+      return;
+    }
+    var card = t.closest && t.closest('.pl-card');
+    if (card && card.dataset.name) { detail = card.dataset.name; renderDetail(detail); }
+  });
+
+  // WS data: update plugin list on each push
+  if (window.__rompOnMessage) {
+    window.__rompOnMessage(function(msg) {
+      if (msg && msg.type === 'plugins' && msg.plugins) {
+        plugins = msg.plugins;
+        if (detail) renderDetail(detail); else renderList();
+      }
+    });
+  }
+
+  // initial load from the baked-in data (server-rendered)
+  try { plugins = JSON.parse(document.getElementById('pl-init').textContent); } catch(e) {}
+  renderList();
+})();
+"""
+
+
 def _plugins_page():
-    """Plugin list + status — JSON array of {name, description, entry, ui, configPath, pidFile, dir, status}."""
-    plugins = _plugins_cache[0] or _scan_plugins()
-    return json.dumps([{**p, "status": _plugin_status(p)} for p in plugins])
+    """The plugins pane — a card list of discovered plugins with status + start/stop,
+    detail view loads the plugin's ui.html. Plain inline JS, no bundle (follows the
+    gear.js precedent for self-contained pages)."""
+    v = _dist_ver()
+    plugins_json = json.dumps([
+        {"name": p.get("name", ""), "description": p.get("description", ""),
+         "status": _plugin_status(p), "hasUi": bool(p.get("ui")),
+         "ui": "/plugins/%s/%s" % (p["name"], p["ui"]) if p.get("ui") else None}
+        for p in (_plugins_cache[0] or _scan_plugins())
+    ])
+    return ("<!DOCTYPE html><html lang=en><head><meta charset=UTF-8>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<link rel=icon type=image/svg+xml href=/media/romp-swirl-glyph.svg>"
+            "<title>Romp · plugins</title>"
+            "<style>" + THEME_CSS + "\n" + _PLUGINS_CSS + "</style></head>"
+            "<body><div id=plugins-root></div>"
+            "<script id=pl-init type=application/json>" + plugins_json + "</script>"
+            "<script>" + _shim("plugins", v) + "</script>"
+            "<script>" + _PLUGINS_JS + "</script></body></html>")
 
 
 # The romp-tl-* wrapper styles live in ui/webview/timeline-pane.css — ONE file, read live here (like the
@@ -14982,7 +15125,7 @@ function kbOpen(){var vv=window.visualViewport;return vv?(window.innerHeight-vv.
 function barfit(){try{document.documentElement.style.setProperty('--mtabs-h',(kbOpen()?0:(bar.offsetHeight||0))+'px');}catch(e){}}
 barfit();window.addEventListener('resize',barfit);window.addEventListener('orientationchange',barfit);
 if(window.visualViewport){window.visualViewport.addEventListener('resize',barfit);}
-var F={chat:document.getElementById('f-chat'),fleet:document.getElementById('f-fleet'),feed:document.getElementById('f-feed'),timeline:document.getElementById('f-timeline')};
+var F={chat:document.getElementById('f-chat'),fleet:document.getElementById('f-fleet'),feed:document.getElementById('f-feed'),timeline:document.getElementById('f-timeline'),plugins:document.getElementById('f-plugins')};
 var B=bar.querySelectorAll('button'),KT='romp-mobile-tab';
 function show(p){if(!F[p])return;document.body.setAttribute('data-tab',p);for(var k in F)F[k].classList.toggle('m-on',k===p);
 for(var i=0;i<B.length;i++)B[i].classList.toggle('on',B[i].getAttribute('data-pane')===p);
@@ -15065,17 +15208,18 @@ _STALE_JS = (
 # key,to?) so the legacy toggleFleet postMessage (_LANDING_FLEET_JS) routes through the same path.
 _LANDING_COLLAPSE_JS = """
 (function(){
-  var PK='romp-panes',po={chat:true,fleet:false,feed:true,timeline:true};
+  var PK='romp-panes',po={chat:true,fleet:false,feed:true,timeline:true,plugins:false};
   try{var s=JSON.parse(localStorage.getItem(PK)||'null');if(s)po=Object.assign(po,s);}catch(e){}
   var qp=new URLSearchParams(location.search).get('panes');
-  if(qp!==null){po={chat:false,fleet:false,feed:false,timeline:false};qp.split(',').forEach(function(k){k=k.trim();if(k in po)po[k]=true;});}
+  if(qp!==null){po={chat:false,fleet:false,feed:false,timeline:false,plugins:false};qp.split(',').forEach(function(k){k=k.trim();if(k in po)po[k]=true;});}
   function saveP(){try{localStorage.setItem(PK,JSON.stringify(po));}catch(e){}}
-  var LBL={chat:'chat',fleet:'fleet',feed:'feed',timeline:'timeline'};
+  var LBL={chat:'chat',fleet:'fleet',feed:'feed',timeline:'timeline',plugins:'plugins'};
   function apply(){
     document.body.classList.toggle('po-chat',!!po.chat);
     document.body.classList.toggle('po-fleet',!!po.fleet);
     document.body.classList.toggle('po-feed',!!po.feed);
     document.body.classList.toggle('po-timeline',!!po.timeline);
+    document.body.classList.toggle('po-plugins',!!po.plugins);
     Array.prototype.forEach.call(document.querySelectorAll('.rail-btn[data-pane]'),function(b){
       var k=b.getAttribute('data-pane');b.classList.toggle('on',!!po[k]);
       b.title=(po[k]?'hide':'show')+' the '+(LBL[k]||k);});
@@ -15422,6 +15566,10 @@ def _landing():
             # off hides it AND the now-orphaned gutters. Fixed order: chat, fleet, feed. Timeline is the band.
             "#chat-pane{flex:var(--g-chat,60) 1 0}#fleet-pane{flex:var(--g-fleet,34) 1 0}#feed-pane{flex:var(--g-feed,40) 1 0}"
             "body:not(.po-chat) #chat-pane{display:none}body:not(.po-fleet) #fleet-pane{display:none}body:not(.po-feed) #feed-pane{display:none}"
+            # plugins rides the same row but is NOT part of the drag-resizable chat/fleet/feed group (no
+            # --g-plugins var, no gutter) — it just takes an equal flex share when shown, hidden otherwise.
+            "#plugins-pane{flex:1 1 0}"
+            "body:not(.po-plugins) #plugins-pane{display:none}"
             ".row>.gv{flex:0 0 5px}"
             # gv-a sits chat|fleet (only when both shown); gv-b sits (fleet|chat)|feed — the chat|feed gutter when fleet off.
             "body:not(.po-chat) #gv-a,body:not(.po-fleet) #gv-a{display:none}"
@@ -15476,11 +15624,11 @@ def _landing():
             ".pane.pane-focused::after{display:none}"
             # the Outline (fleet) rides the tab bar like every other pane (the user 2026-07-11, who couldn't
             # access the outline view in the mobile UI — it was desktop-only before)
-            "#chat-pane,#fleet-pane,#feed-pane,#tl-pane{display:contents!important}"
+            "#chat-pane,#fleet-pane,#feed-pane,#tl-pane,#plugins-pane{display:contents!important}"
             # reset the desktop iframe absolute-fill (the bare `iframe` reset below re-flows them as tab panes)
             ".pane>iframe{position:static;inset:auto;width:100%;height:100%}"
             "iframe{position:static;display:none;width:100%;height:100%;border:0}"
-            "#f-chat.m-on,#f-fleet.m-on,#f-feed.m-on{display:block}"
+            "#f-chat.m-on,#f-fleet.m-on,#f-feed.m-on,#f-plugins.m-on{display:block}"
             "#f-timeline{flex:1 1 auto;min-height:0}#f-timeline.m-on{display:block}"
             "body[data-tab=timeline] .row{display:none}"    # timeline tab active → collapse the chat/feed row so the band fills
             # compact text-only switcher, FIXED to the visible viewport bottom so nothing can sit below it.
@@ -15569,6 +15717,7 @@ def _landing():
             "<div class=pane id=fleet-pane><iframe id=f-fleet src=/fleet></iframe></div>"
             "<div class=gv id=gv-b></div>"
             "<div class=pane id=feed-pane><iframe id=f-feed src=/feed></iframe></div>"
+            "<div class=pane id=plugins-pane><iframe id=f-plugins src=/plugins></iframe></div>"
             "</div>"
             # the timeline BOTTOM BAND: full-width below the pane row, with a row-resize gutter above it. Both
             # are hidden (CSS) unless po-timeline (the rail's Timeline toggle).
@@ -15585,6 +15734,7 @@ def _landing():
             "<div class=rail-btn data-pane=timeline>Timeline</div>"
             "<div class=rail-btn data-pane=fleet>Outline</div>"   # data-pane key stays 'fleet' (internal); the user-facing label is Outline
             "<div class=rail-btn data-pane=feed>Feed</div>"
+            "<div class=rail-btn data-pane=plugins>Plugins</div>"
             # the Claude /usage rate-limit bars (Pro/Max): three compact vertical bar-pairs (used % colored +
             # elapsed % slate), %-label, full detail on hover — side-by-side in the bottom bar.
             "<div id=rail-usage></div>"
@@ -15624,6 +15774,7 @@ def _landing():
             "<button data-pane=fleet>Outline</button>"   # data-pane key stays 'fleet' (internal), label Outline
             "<button data-pane=feed>Feed</button>"
             "<button data-pane=timeline>Timeline</button>"
+            "<button data-pane=plugins>Plugins</button>"
             # the rail's ACTIONS, reachable on mobile too (the user 2026-07-11): settings + the network
             # panel + a usage panel showing the desktop tooltip's window bars. data-act (not data-pane) —
             # they fire, they don't switch the shown pane.
@@ -16070,7 +16221,23 @@ class Handler(BaseHTTPRequestHandler):
                 _client_seen[0] = time.time()
                 return self._send(200, _fleet_page(), "text/html; charset=utf-8", cache="no-cache")
             if p == "/plugins":
-                return self._send(200, _plugins_page(), "application/json", cache="no-cache")
+                _client_seen[0] = time.time()
+                return self._send(200, _plugins_page(), "text/html; charset=utf-8", cache="no-cache")
+            if p.startswith("/plugins/"):
+                # Serve static files from a plugin's own directory (its ui.html + assets) — the ONLY way a
+                # plugin's UI reaches the browser, since there is no bundle for plugin code. Path-traversal
+                # is blocked by resolving and checking containment under that one plugin's dir (pbase).
+                parts = p.split("/", 3)   # ['', 'plugins', name, file]
+                if len(parts) == 4:
+                    fp = (ROOT / "plugins" / parts[2] / parts[3]).resolve()
+                    pbase = (ROOT / "plugins" / parts[2]).resolve()
+                    if pbase in fp.parents or fp == pbase:
+                        if fp.is_file():
+                            ct = {"html": "text/html", "js": "text/javascript", "css": "text/css",
+                                  "svg": "image/svg+xml", "json": "application/json",
+                                  "png": "image/png"}.get(fp.suffix.lstrip("."), "text/plain")
+                            return self._send(200, fp.read_bytes(), ct + "; charset=utf-8", cache="no-cache")
+                return self._send(404, "not found", "text/plain")
             if p.startswith("/dist/") or p.startswith("/media/"):
                 base = DIST if p.startswith("/dist/") else MEDIA
                 fp = (base / p.split("/", 2)[2]).resolve()
