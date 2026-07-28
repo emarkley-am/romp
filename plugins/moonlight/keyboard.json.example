@@ -1,0 +1,8 @@
+{
+  "keys": [33, 34, 35, 36, 37, 38],
+  "pins": {"web": 33},
+  "idle": "dim",
+  "kontroll": "kontroll",
+  "set_rgb_args": "set-rgb {led} --color {color}",
+  "set_rgb_all_args": "set-rgb-all --color {color}"
+}
