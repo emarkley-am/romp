@@ -31,6 +31,7 @@ CHAT_VIEW = ROOT / "vscode-extension"               # the tuned UI, current in t
 DIST = CHAT_VIEW / "dist"                    # bundles built from ui/webview sources (the human's tuned render layer)
 MEDIA = CHAT_VIEW / "media"
 UI = ROOT / "ui"                             # the browser UI: timeline view + webview sources (served/built from here)
+STATE = jd.STATE                             # the romp state directory (~/.local/state/romp/)
 NAMES = jd.STATE / "names"
 PORT = int(os.environ.get("ROMP_KERNEL_PORT", "29855"))   # the manager/extension default; env still overrides. Renumbered from 7433 (the user 2026-07-24), which an LLM had picked — so a twin-prompted project plausibly binds it — and whose nearest IANA neighbour is 7443. 29855 was drawn at random from the ports absent from /etc/services, minus common dev defaults, below the 49152 ephemeral floor.
 BIND = os.environ.get("ROMP_SERVE_HOST", "127.0.0.1")   # loopback only; tailnet/phone reach = `tailscale serve` proxying to loopback (docs/guide.md#from-your-phone). Env override is a test seam, not a user knob.
@@ -14169,6 +14170,12 @@ def _fleet_page():
             % (v, THEME_CSS, fleet_css, _pane_spin("fleet-list"), _shim("fleet", v), v, v))
 
 
+def _plugins_page():
+    """Plugin list + status — JSON array of {name, description, entry, ui, configPath, pidFile, dir, status}."""
+    plugins = _plugins_cache[0] or _scan_plugins()
+    return json.dumps([{**p, "status": _plugin_status(p)} for p in plugins])
+
+
 # The romp-tl-* wrapper styles live in ui/webview/timeline-pane.css — ONE file, read live here (like the
 # view JS itself) and bundled into the VS Code VSIX by vscode-extension/esbuild.js, so the two hosts cannot drift.
 
@@ -15734,6 +15741,53 @@ def _landing():
             "</body></html>")
 
 
+# ───────────────────────── plugin discovery + lifecycle ─────────────────────────
+_plugins_cache = [None]   # [list] — refreshed on /plugin POST or first /plugins connect
+
+def _scan_plugins():
+    """Read plugins/*/manifest.json — the ONLY contract between the kernel and a
+    plugin. A missing or malformed manifest silently skips the directory (a WIP
+    plugin that hasn't shipped its manifest yet is invisible, not an error)."""
+    out = []
+    pdir = ROOT / "plugins"
+    if not pdir.is_dir():
+        return out
+    for d in sorted(pdir.iterdir()):
+        mf = d / "manifest.json"
+        if not mf.is_file():
+            continue
+        try:
+            m = json.loads(mf.read_text())
+            m["dir"] = str(d)
+            out.append(m)
+        except Exception:
+            pass
+    _plugins_cache[0] = out
+    return out
+
+
+def _plugin_status(plugin):
+    """running | stopped | not_configured — derived from the PID file and the
+    config file, both cheap stats (no subprocess calls, safe for the push loop)."""
+    cfg = plugin.get("configPath", "")
+    if cfg:
+        cp = Path(os.path.expanduser(cfg))
+        if not cp.exists():
+            return "not_configured"
+    pf = plugin.get("pidFile")
+    if not pf:
+        return "stopped"
+    pidpath = STATE / pf
+    if not pidpath.exists():
+        return "stopped"
+    try:
+        pid = int(pidpath.read_text().strip())
+        os.kill(pid, 0)
+        return "running"
+    except Exception:
+        return "stopped"
+
+
 # This kernel PROCESS's identity, minted at import. /healthz carries it (X-Romp-Boot) and the landing
 # page embeds it, so the restart button can tell "the new kernel is up" (id flipped) from "the old
 # kernel is still answering" (id unchanged) — an exact event, not a down-then-up timing guess.
@@ -16015,6 +16069,8 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/fleet":
                 _client_seen[0] = time.time()
                 return self._send(200, _fleet_page(), "text/html; charset=utf-8", cache="no-cache")
+            if p == "/plugins":
+                return self._send(200, _plugins_page(), "application/json", cache="no-cache")
             if p.startswith("/dist/") or p.startswith("/media/"):
                 base = DIST if p.startswith("/dist/") else MEDIA
                 fp = (base / p.split("/", 2)[2]).resolve()
@@ -16421,6 +16477,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, json.dumps({"ok": False, "error": "host required"}), "application/json")
                 ok, detail = _start_remote(host)
                 return self._send(200 if ok else 502, json.dumps({"ok": ok, "detail": detail}), "application/json")
+            if u.path == "/plugin":
+                # Plugin action — refresh the scan cache on every POST (so a newly-shipped manifest
+                # or config appears immediately). Future: control plugin startup/shutdown here.
+                _scan_plugins()
+                return self._send(200, json.dumps({"ok": True}), "application/json")
             return self._send(404, "not found", "text/plain")
         except (BrokenPipeError, ConnectionResetError):
             pass

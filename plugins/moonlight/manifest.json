@@ -1,0 +1,8 @@
+{
+  "name": "moonlight",
+  "description": "Mirror session status onto ZSA keyboard RGB keys",
+  "entry": "moonlight.py",
+  "ui": "ui.html",
+  "configPath": "~/.config/romp/keyboard.json",
+  "pidFile": "moonlight.pid"
+}
