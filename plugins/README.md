@@ -66,16 +66,47 @@ on that session. Same effect as clicking a session in the dashboard.
 
 All POST routes return `{"ok": true}` or `{"ok": false, "error": "..."}`.
 
+## Plugin registration
+
+Each plugin directory must contain a `manifest.json`:
+
+```json
+{
+  "name": "moonlight",
+  "description": "Mirror session status onto ZSA keyboard RGB keys",
+  "entry": "moonlight.py",
+  "ui": "ui.html",
+  "configPath": "~/.config/romp/keyboard.json",
+  "pidFile": "moonlight.pid"
+}
+```
+
+- `entry`: the Python file the kernel spawns with `--ensure` for start.
+- `ui` (optional): an HTML file served at `/plugins/<name>/<file>` and loaded
+  in the Plugins pane's detail view. Plain HTML + inline JS/CSS — no build step.
+- `configPath`: the plugin's config file; the kernel checks existence to
+  derive "not configured" status.
+- `pidFile`: filename under the state dir; the kernel checks it for
+  running/stopped status.
+
+The dashboard's Plugins pane discovers all manifests at startup and shows a
+card per plugin with status (running / stopped / not configured) and
+start/stop controls. `POST /plugin` with `{"name":"...","action":"start"}` or
+`"stop"` manages the daemon lifecycle.
+
 ## Writing a plugin
 
-1. Subscribe to `/ws?app=fleet` for status. The kernel pushes on every change;
+1. Create a directory under `plugins/` with a `manifest.json` (see above).
+2. Subscribe to `/ws?app=fleet` for status. The kernel pushes on every change;
    no polling needed.
-2. Use only the API above. Never import from `kernel/`, `cli/`, or `postal/` —
+3. Use only the API above. Never import from `kernel/`, `cli/`, or `postal/` —
    the network boundary is the contract.
-3. Manage your own lifecycle (PID file, signal handling, cleanup on exit).
-4. Fail loudly when the kernel is unreachable — never silently serve stale
+4. Manage your own lifecycle (PID file, signal handling, cleanup on exit).
+5. Fail loudly when the kernel is unreachable — never silently serve stale
    state.
-5. Add a README with setup instructions and a config example.
+6. Add a README with setup instructions and a config example.
+7. Optionally add a `ui.html` for a rich setup/monitoring UI in the Plugins
+   pane's detail view.
 
 ## Existing plugins
 
