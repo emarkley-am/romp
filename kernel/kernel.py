@@ -16478,10 +16478,58 @@ class Handler(BaseHTTPRequestHandler):
                 ok, detail = _start_remote(host)
                 return self._send(200 if ok else 502, json.dumps({"ok": ok, "detail": detail}), "application/json")
             if u.path == "/plugin":
-                # Plugin action — refresh the scan cache on every POST (so a newly-shipped manifest
-                # or config appears immediately). Future: control plugin startup/shutdown here.
-                _scan_plugins()
-                return self._send(200, json.dumps({"ok": True}), "application/json")
+                # Plugin lifecycle + utility actions (the plugins pane —
+                # docs/superpowers/specs/2026-07-27-plugins-pane-design.md).
+                try:
+                    b = json.loads(raw_body or b"{}")
+                except Exception:
+                    return self._send(400, json.dumps({"ok": False, "error": "bad JSON"}), "application/json")
+                name = str(b.get("name", ""))
+                action = str(b.get("action", ""))
+                plugins = _plugins_cache[0] or _scan_plugins()
+                plugin = next((p for p in plugins if p.get("name") == name), None)
+                if not plugin:
+                    return self._send(200, json.dumps({"ok": False, "error": "unknown plugin %r" % name}), "application/json")
+                if action == "start":
+                    entry = Path(plugin["dir"]) / plugin.get("entry", "")
+                    if not entry.is_file():
+                        return self._send(200, json.dumps({"ok": False, "error": "entry %s not found" % entry}), "application/json")
+                    subprocess.Popen([sys.executable, str(entry), "--ensure"],
+                                     cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    time.sleep(0.3)   # let the double-fork settle so status reads "running"
+                    return self._send(200, json.dumps({"ok": True, "status": _plugin_status(plugin)}), "application/json")
+                if action == "stop":
+                    pf = plugin.get("pidFile")
+                    if pf:
+                        pidpath = STATE / pf
+                        try:
+                            pid = int(pidpath.read_text().strip())
+                            os.kill(pid, signal.SIGTERM)
+                        except Exception:
+                            pass
+                    time.sleep(0.3)
+                    return self._send(200, json.dumps({"ok": True, "status": _plugin_status(plugin)}), "application/json")
+                if action == "check-deps":
+                    kontroll = shutil.which("kontroll")
+                    keymapp_sock = Path.home() / ".keymapp" / "keymapp.sock"
+                    return self._send(200, json.dumps({"ok": True,
+                        "kontroll": bool(kontroll), "kontrollPath": kontroll or "",
+                        "keymapp": keymapp_sock.exists()}), "application/json")
+                if action == "light-led":
+                    led = b.get("led")
+                    color = b.get("color", "#2ecc71")
+                    if led is None:
+                        return self._send(400, json.dumps({"ok": False, "error": "led required"}), "application/json")
+                    kontroll = shutil.which("kontroll")
+                    if not kontroll:
+                        return self._send(200, json.dumps({"ok": False, "error": "kontroll not found"}), "application/json")
+                    try:
+                        subprocess.run([kontroll, "set-rgb", str(led), "--color", color],
+                                       capture_output=True, timeout=5)
+                    except Exception as e:
+                        return self._send(200, json.dumps({"ok": False, "error": str(e)}), "application/json")
+                    return self._send(200, json.dumps({"ok": True}), "application/json")
+                return self._send(400, json.dumps({"ok": False, "error": "unknown action %r" % action}), "application/json")
             return self._send(404, "not found", "text/plain")
         except (BrokenPipeError, ConnectionResetError):
             pass

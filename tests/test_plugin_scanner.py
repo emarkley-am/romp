@@ -40,5 +40,20 @@ class ManifestShape(unittest.TestCase):
         self.assertEqual(m["name"], "moonlight")
 
 
+class PluginRouteShape(unittest.TestCase):
+    def setUp(self):
+        self.src = open(os.path.join(ROOT, "kernel", "kernel.py")).read()
+
+    def test_start_action(self):
+        i = self.src.find('u.path == "/plugin"')
+        self.assertGreater(i, -1)
+        block = self.src[i:i + 3000]
+        self.assertIn('"start"', block)
+        self.assertIn('"stop"', block)
+        self.assertIn('SIGTERM', block)
+        self.assertIn('"check-deps"', block)
+        self.assertIn('"light-led"', block)
+
+
 if __name__ == "__main__":
     unittest.main()
